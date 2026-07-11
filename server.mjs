@@ -2,7 +2,8 @@ import "dotenv/config";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { join, extname } from "node:path";
+import { join, extname, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { createGzip } from "node:zlib";
 import * as db from "./lib/db.mjs";
@@ -10,8 +11,9 @@ import { hashPassword, verifyPassword } from "./lib/crypto.mjs";
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
-const DIST = join(process.cwd(), "dist");
+const DIST = join(__dirname, "dist");
 const SESSION_SECRET = process.env.SESSION_SECRET || randomUUID();
 const MAX_BODY_BYTES = 1_048_576; // 1 MB
 const SESSION_ROTATE_MS = 3_600_000; // rotate every 1 hour
