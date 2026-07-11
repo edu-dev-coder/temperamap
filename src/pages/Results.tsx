@@ -185,6 +185,10 @@ function isChildTest(testType: string) {
   return ["child_3_5", "child_6_9", "preteen_10_12", "teen_13_17"].includes(testType);
 }
 
+function usesChildScoring(testType: string) {
+  return ["child_3_5", "child_6_9", "preteen_10_12"].includes(testType);
+}
+
 function isCouplesTest(testType: string) {
   return testType === "couples_test";
 }
@@ -398,19 +402,25 @@ export default function Results() {
                   <CardTitle className="text-primary text-base">Score Breakdown</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  {Object.entries(results)
-                    .sort((a, b) => b[1] - a[1])
-                    .map(([t, p]) => (
-                      <div key={t}>
-                        <div className="flex justify-between text-sm mb-1.5">
-                          <span className={`font-semibold ${t === primary ? "text-primary" : "text-muted-foreground"}`}>
-                            {t} {t === primary ? "★" : ""}
-                          </span>
-                          <span className="font-bold text-foreground">{Math.round(p)}%</span>
-                        </div>
-                        <Progress value={p} className="h-2.5" />
-                      </div>
-                    ))}
+                  {(() => {
+                    const maxScore = usesChildScoring(testType) ? 75 : 60;
+                    return Object.entries(results)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([t, p]) => {
+                        const pct = Math.round((p / maxScore) * 100);
+                        return (
+                          <div key={t}>
+                            <div className="flex justify-between text-sm mb-1.5">
+                              <span className={`font-semibold ${t === primary ? "text-primary" : "text-muted-foreground"}`}>
+                                {t} {t === primary ? "★" : ""}
+                              </span>
+                              <span className="font-bold text-foreground">{pct}%</span>
+                            </div>
+                            <Progress value={pct} className="h-2.5" />
+                          </div>
+                        );
+                      });
+                  })()}
                 </CardContent>
               </Card>
             )}

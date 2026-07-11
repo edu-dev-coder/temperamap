@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS test_sessions (
   test_type TEXT NOT NULL,
   status TEXT DEFAULT 'pending',
   paid BOOLEAN DEFAULT false,
+  answers JSONB,
+  results JSONB,
   primary_temp TEXT,
   secondary_temp TEXT,
   blend TEXT,
@@ -134,10 +136,17 @@ ON CONFLICT (id) DO NOTHING;
 -- Test Sessions
 INSERT INTO test_sessions (id, user_id, user_email, user_name, test_type, status, paid, primary_temp, secondary_temp, blend, passcode_used, created_at, completed_at)
 VALUES
-  ('ts-001', 'u-002', 'bob@example.com',      'Bob Reyes',      'single_test', 'completed', true,  'choleric',  'sanguine',  'The Driver',       'TM-EF34GH', '2026-06-15T10:30:00.000Z', '2026-06-15T10:40:00.000Z'),
-  ('ts-002', 'u-003', 'carla@example.com',     'Carla Nguyen',   'single_test', 'completed', true,  'melancholic','phlegmatic','The Observer',     'TM-AB12CD', '2026-06-20T09:15:00.000Z', '2026-06-20T09:25:00.000Z'),
+  ('ts-001', 'u-002', 'bob@example.com',      'Bob Reyes',      'single_test', 'completed', true,  'choleric',  'sanguine',  'Choleric-Sanguine',  'TM-EF34GH', '2026-06-15T10:30:00.000Z', '2026-06-15T10:40:00.000Z'),
+  ('ts-002', 'u-003', 'carla@example.com',     'Carla Nguyen',   'single_test', 'completed', true,  'melancholic','phlegmatic','Melancholic-Phlegmatic','TM-AB12CD', '2026-06-20T09:15:00.000Z', '2026-06-20T09:25:00.000Z'),
   ('ts-003', 'u-004', 'derek@example.com',     'Derek Wilson',   'single_test', 'pending',   false, NULL,         NULL,        NULL,               NULL,        '2026-07-01T15:00:00.000Z', NULL),
-  ('ts-004', 'u-002', 'bob@example.com',       'Bob Reyes',      'couple_test', 'completed', true,  'sanguine',   'melancholic','The Entertainer',  'TM-EF34GH', '2026-06-22T18:00:00.000Z', '2026-06-22T18:12:00.000Z'),
-  ('ts-005', 'u-003', 'carla@example.com',     'Carla Nguyen',   'single_test', 'completed', false, 'phlegmatic', 'choleric',  'The Peacemaker',   'TM-JK56LM', '2026-07-05T11:00:00.000Z', '2026-07-05T11:08:00.000Z'),
-  ('ts-006', 'u-001', 'alice@example.com',     'Alice Park',     'group_test',  'completed', true,  'choleric',   'melancholic','The Architect',    'TM-NP78QR', '2026-07-08T09:00:00.000Z', '2026-07-08T09:15:00.000Z')
+  ('ts-004', 'u-002', 'bob@example.com',       'Bob Reyes',      'couple_test', 'completed', true,  'sanguine',   'melancholic','Sanguine-Melancholic','TM-EF34GH', '2026-06-22T18:00:00.000Z', '2026-06-22T18:12:00.000Z'),
+  ('ts-005', 'u-003', 'carla@example.com',     'Carla Nguyen',   'single_test', 'completed', false, 'phlegmatic', 'choleric',  'Phlegmatic-Choleric','TM-JK56LM', '2026-07-05T11:00:00.000Z', '2026-07-05T11:08:00.000Z'),
+  ('ts-006', 'u-001', 'alice@example.com',     'Alice Park',     'group_test',  'completed', true,  'choleric',   'melancholic','Choleric-Melancholic','TM-NP78QR', '2026-07-08T09:00:00.000Z', '2026-07-08T09:15:00.000Z')
 ON CONFLICT (id) DO NOTHING;
+
+-- ============================================================
+-- MIGRATION: Run this if your test_sessions table already exists
+-- without answers/results columns
+-- ============================================================
+-- ALTER TABLE test_sessions ADD COLUMN IF NOT EXISTS answers JSONB;
+-- ALTER TABLE test_sessions ADD COLUMN IF NOT EXISTS results JSONB;

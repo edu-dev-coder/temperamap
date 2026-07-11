@@ -634,9 +634,20 @@ async function handleAPI(req, res, ip) {
       return json(res, { error: "Passcode is required" }, 400);
     }
     const match = await db.findPasscodeByCode(body.passcode);
+    const newId = `ts-${randomUUID().slice(0, 8)}`;
+    const sessionRecord = {
+      id: newId,
+      userId: sessionUserId || "anonymous",
+      testType: body.testType || "single_test",
+      status: "pending",
+      paid: true,
+      passcodeUsed: body.passcode,
+      createdAt: new Date().toISOString(),
+    };
+    await db.createTestSession(sessionRecord);
     if (match) await db.usePasscode(match.code, sessionUserId || "anonymous");
     audit(ip, method, url, 201, sessionUserId);
-    return json(res, { id: randomUUID() }, 201);
+    return json(res, { id: newId, testType: sessionRecord.testType }, 201);
   }
 
   if (method === "GET" && url.startsWith("/api/tests/")) {
@@ -645,11 +656,36 @@ async function handleAPI(req, res, ip) {
       audit(ip, method, url, 400, sessionUserId);
       return json(res, { error: "Invalid test ID" }, 400);
     }
+    const session = await db.findTestSessionById(testId);
+    if (!session) {
+      audit(ip, method, url, 404, sessionUserId);
+      return json(res, { error: "Session not found" }, 404);
+    }
     audit(ip, method, url, 200, sessionUserId);
-    return json(res, { id: testId, testType: "single_test", status: "paid", paid: true, results: null, primaryTemp: null, secondaryTemp: null, blend: null, completedAt: null });
+    return json(res, session);
   }
 
   if (method === "PATCH" && url.startsWith("/api/tests/")) {
+    const testId = url.split("/").pop();
+    if (!isValidId(testId)) {
+      audit(ip, method, url, 400, sessionUserId);
+      return json(res, { error: "Invalid test ID" }, 400);
+    }
+    const body = await readBody(req);
+    const existing = await db.findTestSessionById(testId);
+    if (!existing) {
+      audit(ip, method, url, 404, sessionUserId);
+      return json(res, { error: "Session not found" }, 404);
+    }
+    const allowed = {};
+    if (body.status !== undefined) allowed.status = body.status;
+    if (body.answers !== undefined) allowed.answers = body.answers;
+    if (body.results !== undefined) allowed.results = body.results;
+    if (body.primaryTemp !== undefined) allowed.primaryTemp = body.primaryTemp;
+    if (body.secondaryTemp !== undefined) allowed.secondaryTemp = body.secondaryTemp;
+    if (body.blend !== undefined) allowed.blend = body.blend;
+    if (body.completedAt !== undefined) allowed.completedAt = body.completedAt;
+    await db.updateTestSession(testId, allowed);
     audit(ip, method, url, 200, sessionUserId);
     return json(res, { ok: true });
   }
