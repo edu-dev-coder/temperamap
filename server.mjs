@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";

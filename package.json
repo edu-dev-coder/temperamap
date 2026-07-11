@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.49.0"
+    "@supabase/supabase-js": "^2.49.0",
+    "dotenv": "^17.4.2"
   },
   "devDependencies": {
     "@hookform/resolvers": "^3.10.0",
