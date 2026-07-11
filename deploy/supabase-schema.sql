@@ -8,10 +8,13 @@
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   email TEXT UNIQUE NOT NULL,
-  password_hash TEXT NOT NULL,
+  password_hash TEXT NOT NULL DEFAULT '',
   first_name TEXT,
   last_name TEXT,
   role TEXT DEFAULT 'user',
+  provider TEXT DEFAULT 'local',
+  provider_id TEXT,
+  avatar_url TEXT,
   created_at TIMESTAMPTZ DEFAULT now(),
   last_login TIMESTAMPTZ
 );

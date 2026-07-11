@@ -478,6 +478,85 @@ async function handleAPI(req, res, ip) {
     return json(res, { ok: true });
   }
 
+  // ── Google OAuth ────────────────────────────────────────────────────────
+  if (method === "GET" && url === "/api/auth/google") {
+    const clientId = process.env.GOOGLE_CLIENT_ID;
+    const redirectUri = `${req.headers.host?.includes("localhost") ? "http" : "https"}://${req.headers.host}/api/auth/google/callback`;
+    const scope = "openid email profile";
+    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(scope)}&access_type=offline&prompt=consent`;
+    res.writeHead(302, { Location: authUrl });
+    return res.end();
+  }
+
+  if (method === "GET" && url === "/api/auth/google/callback") {
+    const parsedUrl = new URL(url, `https://${req.headers.host}`);
+    const code = parsedUrl.searchParams.get("code");
+    const error = parsedUrl.searchParams.get("error");
+
+    if (error || !code) {
+      res.writeHead(302, { Location: "/sign-in?error=google_denied" });
+      return res.end();
+    }
+
+    try {
+      const redirectUri = `${req.headers.host?.includes("localhost") ? "http" : "https"}://${req.headers.host}/api/auth/google/callback`;
+      const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          code,
+          client_id: process.env.GOOGLE_CLIENT_ID,
+          client_secret: process.env.GOOGLE_CLIENT_SECRET,
+          redirect_uri: redirectUri,
+          grant_type: "authorization_code",
+        }),
+      });
+      const tokens = await tokenRes.json();
+      if (!tokens.access_token) {
+        res.writeHead(302, { Location: "/sign-in?error=google_token" });
+        return res.end();
+      }
+
+      const userRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+        headers: { Authorization: `Bearer ${tokens.access_token}` },
+      });
+      const googleUser = await userRes.json();
+
+      let user = await db.findUserByProvider("google", googleUser.id);
+      if (!user) {
+        user = await db.findUserByEmail(googleUser.email);
+        if (user) {
+          // Link existing email account to Google
+          await supabase.from("users").update({ provider: "google", provider_id: googleUser.id, avatar_url: googleUser.picture }).eq("id", user.id);
+          user.provider = "google";
+          user.providerId = googleUser.id;
+          user.avatarUrl = googleUser.picture;
+        } else {
+          user = await db.createGoogleUser({
+            email: googleUser.email,
+            firstName: googleUser.given_name || null,
+            lastName: googleUser.family_name || null,
+            providerId: googleUser.id,
+            avatarUrl: googleUser.picture,
+          });
+        }
+      }
+
+      await db.updateUserLastLogin(user.id);
+      const token = randomUUID();
+      sessions.set(hashToken(token), { userId: user.id, createdAt: Date.now() });
+      res.writeHead(302, {
+        Location: "/dashboard",
+        "Set-Cookie": `tm_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`,
+      });
+      return res.end();
+    } catch (err) {
+      console.error("[google-oauth]", err.message);
+      res.writeHead(302, { Location: "/sign-in?error=google_failed" });
+      return res.end();
+    }
+  }
+
   // ── Passcodes ───────────────────────────────────────────────────────────
   if (method === "GET" && url === "/api/passcodes") {
     audit(ip, method, url, 200, sessionUserId);
