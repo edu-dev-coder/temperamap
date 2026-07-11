@@ -10,6 +10,7 @@ import {
   Sparkles,
   ClipboardList,
   Users,
+  Settings,
   Menu,
   X,
 } from "lucide-react";
@@ -23,6 +24,7 @@ const NAV_ITEMS = [
   { href: "/admin/features", label: "Features", icon: Sparkles },
   { href: "/admin/sessions", label: "Sessions", icon: ClipboardList },
   { href: "/admin/users", label: "Users", icon: Users },
+  { href: "/admin/settings", label: "Settings", icon: Settings },
 ];
 
 export function AdminLayout({

@@ -478,6 +478,31 @@ async function handleAPI(req, res, ip) {
     return json(res, { ok: true });
   }
 
+  // ── Change Password ─────────────────────────────────────────────────────
+  if (method === "POST" && url === "/api/tm/auth/change-password") {
+    if (!sessionUserId) return json(res, { error: "Unauthorized" }, 401);
+    const body = await readBody(req);
+    if (!body.currentPassword || !body.newPassword) {
+      return json(res, { error: "Current and new passwords are required" }, 400);
+    }
+    if (!isValidPassword(body.newPassword)) {
+      return json(res, { error: "New password must be 6-128 characters" }, 400);
+    }
+    const user = await db.findUserById(sessionUserId);
+    if (!user) return json(res, { error: "User not found" }, 404);
+    if (user.provider === "google" && !user.passwordHash) {
+      return json(res, { error: "Google accounts cannot change password here" }, 400);
+    }
+    if (!(await verifyPassword(body.currentPassword, user.passwordHash))) {
+      audit(ip, method, url, 401, sessionUserId);
+      return json(res, { error: "Current password is incorrect" }, 401);
+    }
+    const newHash = await hashPassword(body.newPassword);
+    await db.updateUserPassword(sessionUserId, newHash);
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, { ok: true });
+  }
+
   // ── Google OAuth ────────────────────────────────────────────────────────
   if (method === "GET" && url === "/api/auth/google") {
     const clientId = process.env.GOOGLE_CLIENT_ID;

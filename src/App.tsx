@@ -27,6 +27,7 @@ const AdminFeatures = lazy(() => import("@/pages/admin/Features"));
 const AdminSessions = lazy(() => import("@/pages/admin/Sessions"));
 const AdminUsers = lazy(() => import("@/pages/admin/Users"));
 const AdminPasscodes = lazy(() => import("@/pages/admin/Passcodes"));
+const AdminSettings = lazy(() => import("@/pages/admin/Settings"));
 const NotFound = lazy(() => import("@/pages/not-found"));
 
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -126,6 +127,9 @@ function AppRoutes() {
           </Route>
           <Route path="/admin/passcodes">
             <AdminGate><LazyRoute><AdminPasscodes /></LazyRoute></AdminGate>
+          </Route>
+          <Route path="/admin/settings">
+            <AdminGate><LazyRoute><AdminSettings /></LazyRoute></AdminGate>
           </Route>
           <Route>
             <LazyRoute><NotFound /></LazyRoute>
