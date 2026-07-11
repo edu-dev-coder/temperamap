@@ -1,0 +1,829 @@
+import { createServer } from "node:http";
+import { createHash } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
+import { join, extname } from "node:path";
+import { randomUUID } from "node:crypto";
+import { createGzip } from "node:zlib";
+import { load, getDb, save } from "./lib/store.mjs";
+import { hashPassword, verifyPassword } from "./lib/crypto.mjs";
+
+// ── Config ───────────────────────────────────────────────────────────────────
+
+const PORT = Number(process.env.PORT) || 3000;
+const DIST = join(process.cwd(), "dist");
+const SESSION_SECRET = process.env.SESSION_SECRET || randomUUID();
+const MAX_BODY_BYTES = 1_048_576; // 1 MB
+const SESSION_ROTATE_MS = 3_600_000; // rotate every 1 hour
+const LOGIN_FAIL_LIMIT = 5;
+const LOGIN_FAIL_WINDOW_MS = 900_000; // 15 min
+
+// ── MIME types ───────────────────────────────────────────────────────────────
+
+const MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".webp": "image/webp",
+  ".mp4": "video/mp4",
+};
+
+// ── Sanitization ─────────────────────────────────────────────────────────────
+
+const DANGEROUS_CHARS = /[<>\"'`;\\]/g;
+
+function sanitizeStr(val) {
+  if (typeof val !== "string") return val;
+  return val.replace(DANGEROUS_CHARS, "");
+}
+
+function sanitizeObj(obj) {
+  if (!obj || typeof obj !== "object") return obj;
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === "string") out[k] = sanitizeStr(v);
+    else if (Array.isArray(v)) out[k] = v.map((i) => typeof i === "string" ? sanitizeStr(i) : i);
+    else out[k] = v;
+  }
+  return out;
+}
+
+function isValidEmail(email) {
+  return typeof email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 254;
+}
+
+function isValidPassword(pw) {
+  return typeof pw === "string" && pw.length >= 6 && pw.length <= 128;
+}
+
+function isValidId(id) {
+  return typeof id === "string" && /^[a-zA-Z0-9_-]{1,64}$/.test(id);
+}
+
+// ── Audit log ────────────────────────────────────────────────────────────────
+
+const auditLog = [];
+const AUDIT_MAX = 1000;
+
+function audit(ip, method, url, status, userId) {
+  const entry = { ts: new Date().toISOString(), ip, method, url, status, userId: userId || null };
+  auditLog.push(entry);
+  if (auditLog.length > AUDIT_MAX) auditLog.shift();
+  if (status >= 400) console.log(`[audit] ${status} ${method} ${url} from ${ip}`);
+}
+
+// ── Sessions ─────────────────────────────────────────────────────────────────
+
+const sessions = new Map(); // tokenHash → { userId, createdAt }
+
+function createSession(userId) {
+  const token = randomUUID();
+  sessions.set(hashToken(token), { userId, createdAt: Date.now() });
+  return token;
+}
+
+function destroySession(token) {
+  sessions.delete(hashToken(token));
+}
+
+function getSessionUserId(token) {
+  if (!token) return undefined;
+  const sess = sessions.get(hashToken(token));
+  if (!sess) return undefined;
+  return sess.userId;
+}
+
+function shouldRotateSession(token) {
+  if (!token) return false;
+  const sess = sessions.get(hashToken(token));
+  if (!sess) return false;
+  return Date.now() - sess.createdAt > SESSION_ROTATE_MS;
+}
+
+function parseCookies(header) {
+  const cookies = {};
+  if (!header) return cookies;
+  for (const pair of header.split(";")) {
+    const idx = pair.indexOf("=");
+    if (idx > 0) {
+      const key = pair.slice(0, idx).trim();
+      const val = pair.slice(idx + 1).trim();
+      try { cookies[key] = decodeURIComponent(val); } catch { cookies[key] = val; }
+    }
+  }
+  return cookies;
+}
+
+// ── Brute-force login protection ─────────────────────────────────────────────
+
+const loginAttempts = new Map(); // key (ip or email) → { count, firstAt }
+
+function recordLoginFail(key) {
+  const now = Date.now();
+  let entry = loginAttempts.get(key);
+  if (!entry || now - entry.firstAt > LOGIN_FAIL_WINDOW_MS) {
+    entry = { count: 0, firstAt: now };
+    loginAttempts.set(key, entry);
+  }
+  entry.count++;
+  return entry.count;
+}
+
+function isLoginLocked(key) {
+  const entry = loginAttempts.get(key);
+  if (!entry) return false;
+  if (Date.now() - entry.firstAt > LOGIN_FAIL_WINDOW_MS) {
+    loginAttempts.delete(key);
+    return false;
+  }
+  return entry.count >= LOGIN_FAIL_LIMIT;
+}
+
+function clearLoginFails(key) {
+  loginAttempts.delete(key);
+}
+
+// Cleanup stale login buckets every 5 min
+setInterval(() => {
+  const cutoff = Date.now() - LOGIN_FAIL_WINDOW_MS * 2;
+  for (const [key, entry] of loginAttempts) {
+    if (entry.firstAt < cutoff) loginAttempts.delete(key);
+  }
+}, 300_000).unref();
+
+// ── Rate limiter ─────────────────────────────────────────────────────────────
+
+const rateBuckets = new Map();
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX = 120;
+
+function rateLimit(ip) {
+  const now = Date.now();
+  let bucket = rateBuckets.get(ip);
+  if (!bucket || now - bucket.start > RATE_WINDOW_MS) {
+    bucket = { start: now, count: 0 };
+    rateBuckets.set(ip, bucket);
+  }
+  bucket.count++;
+  return bucket.count > RATE_MAX;
+}
+
+setInterval(() => {
+  const cutoff = Date.now() - RATE_WINDOW_MS * 2;
+  for (const [ip, bucket] of rateBuckets) {
+    if (bucket.start < cutoff) rateBuckets.delete(ip);
+  }
+}, 300_000).unref();
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function getClientIp(req) {
+  return req.headers["x-forwarded-for"]?.split(",")[0]?.trim()
+    || req.socket.remoteAddress
+    || "unknown";
+}
+
+function parseQuery(raw) {
+  const qs = raw.includes("?") ? raw.split("?")[1] : "";
+  const params = {};
+  if (!qs) return params;
+  for (const pair of qs.split("&")) {
+    const [k, v] = pair.split("=");
+    if (k) params[decodeURIComponent(k)] = decodeURIComponent(v ?? "");
+  }
+  return params;
+}
+
+async function readBody(req) {
+  const chunks = [];
+  let totalBytes = 0;
+  for await (const chunk of req) {
+    totalBytes += chunk.length;
+    if (totalBytes > MAX_BODY_BYTES) {
+      throw new Error("BODY_TOO_LARGE");
+    }
+    chunks.push(chunk);
+  }
+  const raw = Buffer.concat(chunks).toString();
+  return raw ? JSON.parse(raw) : {};
+}
+
+function json(res, data, status = 200) {
+  const body = JSON.stringify(data);
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+  });
+  res.end(body);
+}
+
+function hashToken(token) {
+  return createHash("sha256").update(token + SESSION_SECRET).digest("hex");
+}
+
+// ── Security headers ─────────────────────────────────────────────────────────
+
+function setSecurityHeaders(res, origin) {
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-XSS-Protection", "1; mode=block");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()");
+  res.setHeader("X-DNS-Prefetch-Control", "off");
+  res.setHeader("X-Download-Options", "noopen");
+  res.setHeader("X-Permitted-Cross-Domain-Policies", "none");
+
+  // HSTS (only effective behind HTTPS/proxy)
+  res.setHeader("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
+
+  // CSP
+  const csp = [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com",
+    "img-src 'self' data: blob:",
+    "connect-src 'self'",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+  ].join("; ");
+  res.setHeader("Content-Security-Policy", csp);
+}
+
+// ── CORS ─────────────────────────────────────────────────────────────────────
+
+function handleCORS(req, res) {
+  const origin = req.headers.origin;
+  const host = req.headers.host;
+
+  // Allow same-origin only
+  if (origin) {
+    try {
+      const originHost = new URL(origin).host;
+      if (originHost !== host) {
+        res.writeHead(403);
+        res.end(JSON.stringify({ error: "CORS: origin not allowed" }));
+        return false;
+      }
+    } catch {
+      res.writeHead(403);
+      res.end(JSON.stringify({ error: "CORS: invalid origin" }));
+      return false;
+    }
+  }
+
+  // Handle preflight
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": host ? `https://${host}` : "*",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Max-Age": "86400",
+    });
+    res.end();
+    return false;
+  }
+
+  return true;
+}
+
+// ── Compression ──────────────────────────────────────────────────────────────
+
+function compress(res, body, acceptEncoding, extraHeaders = {}) {
+  if (!acceptEncoding.includes("gzip") || Buffer.byteLength(body) < 1024) {
+    res.writeHead(200, extraHeaders);
+    res.end(body);
+    return;
+  }
+  res.writeHead(200, { ...extraHeaders, "Content-Encoding": "gzip", "Vary": "Accept-Encoding" });
+  const gzip = createGzip({ level: 6 });
+  gzip.pipe(res);
+  gzip.end(body);
+}
+
+// ── Static file server ───────────────────────────────────────────────────────
+
+async function serveStatic(req, res, acceptEncoding) {
+  let filePath = join(DIST, req.url === "/" ? "index.html" : req.url.split("?")[0]);
+
+  // Prevent path traversal
+  const resolved = join(DIST, req.url.split("?")[0]);
+  if (!resolved.startsWith(DIST)) {
+    res.writeHead(403);
+    return res.end("Forbidden");
+  }
+  filePath = resolved;
+
+  try {
+    const s = await stat(filePath);
+    if (s.isDirectory()) filePath = join(filePath, "index.html");
+  } catch {
+    filePath = join(DIST, "index.html");
+  }
+
+  try {
+    const data = await readFile(filePath);
+    const ext = extname(filePath);
+    const mime = MIME[ext] || "application/octet-stream";
+    const isHashed = /-[A-Za-z0-9_-]{8}\.\w+$/.test(filePath);
+    const cacheControl = isHashed
+      ? "public, max-age=31536000, immutable"
+      : "public, max-age=0, must-revalidate";
+
+    compress(res, data, acceptEncoding, { "Content-Type": mime, "Cache-Control": cacheControl });
+  } catch {
+    res.writeHead(404);
+    res.end("Not found");
+  }
+}
+
+// ── API router ───────────────────────────────────────────────────────────────
+
+async function handleAPI(req, res, ip) {
+  const url = (req.url ?? "").split("?")[0];
+  const method = req.method;
+  const db = getDb();
+  const cookies = parseCookies(req.headers.cookie);
+  const sessionToken = cookies.tm_session;
+  const sessionUserId = getSessionUserId(sessionToken);
+
+  // ── Health ──────────────────────────────────────────────────────────────
+  if (method === "GET" && url === "/api/health") {
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, { status: "ok", uptime: process.uptime() });
+  }
+
+  // ── Audit log (admin only) ─────────────────────────────────────────────
+  if (method === "GET" && url === "/api/admin/audit") {
+    if (!sessionUserId) return json(res, { error: "Unauthorized" }, 401);
+    const user = db.users.find((u) => u.id === sessionUserId);
+    if (!user || user.role !== "admin") return json(res, { error: "Forbidden" }, 403);
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, auditLog.slice(-200));
+  }
+
+  // ── Auth ────────────────────────────────────────────────────────────────
+  if (method === "GET" && url === "/api/tm/auth/me") {
+    if (!sessionUserId) {
+      audit(ip, method, url, 200, null);
+      return json(res, null);
+    }
+    const user = db.users.find((u) => u.id === sessionUserId);
+    if (!user) {
+      audit(ip, method, url, 200, null);
+      return json(res, null);
+    }
+
+    // Session rotation check
+    if (shouldRotateSession(sessionToken)) {
+      destroySession(sessionToken);
+      const newToken = randomUUID();
+      sessions.set(hashToken(newToken), { userId: user.id, createdAt: Date.now() });
+      res.setHeader("Set-Cookie", `tm_session=${newToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`);
+    }
+
+    audit(ip, method, url, 200, user.id);
+    return json(res, { id: user.id, email: user.email, firstName: user.firstName, lastName: user.lastName, role: user.role, createdAt: user.createdAt, updatedAt: user.createdAt });
+  }
+
+  if (method === "POST" && url === "/api/tm/auth/login") {
+    const body = await readBody(req);
+
+    // Input validation
+    if (!body.email || !body.password) {
+      audit(ip, method, url, 400, null);
+      return json(res, { error: "Email and password are required" }, 400);
+    }
+    if (!isValidEmail(body.email)) {
+      audit(ip, method, url, 400, null);
+      return json(res, { error: "Invalid email format" }, 400);
+    }
+
+    // Brute-force check (by IP and email)
+    if (isLoginLocked(`ip:${ip}`) || isLoginLocked(`email:${body.email}`)) {
+      audit(ip, method, url, 429, null);
+      return json(res, { error: "Too many login attempts. Try again later." }, 429);
+    }
+
+    const user = db.users.find((u) => u.email === body.email);
+    if (!user || !(await verifyPassword(body.password, user.passwordHash))) {
+      const count = Math.max(recordLoginFail(`ip:${ip}`), recordLoginFail(`email:${body.email}`));
+      audit(ip, method, url, 401, null);
+      return json(res, { error: "Invalid email or password" }, 401);
+    }
+
+    clearLoginFails(`ip:${ip}`);
+    clearLoginFails(`email:${body.email}`);
+
+    const token = randomUUID();
+    sessions.set(hashToken(token), { userId: user.id, createdAt: Date.now() });
+    user.lastLogin = new Date().toISOString();
+    save();
+    res.setHeader("Set-Cookie", `tm_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`);
+    audit(ip, method, url, 200, user.id);
+    return json(res, { id: user.id, email: user.email, firstName: user.firstName, lastName: user.lastName, role: user.role, createdAt: user.createdAt, updatedAt: user.createdAt });
+  }
+
+  if (method === "POST" && url === "/api/tm/auth/register") {
+    const body = await readBody(req);
+
+    // Input validation
+    if (!body.email || !body.password) {
+      audit(ip, method, url, 400, null);
+      return json(res, { error: "Email and password are required" }, 400);
+    }
+    if (!isValidEmail(body.email)) {
+      audit(ip, method, url, 400, null);
+      return json(res, { error: "Invalid email format" }, 400);
+    }
+    if (!isValidPassword(body.password)) {
+      audit(ip, method, url, 400, null);
+      return json(res, { error: "Password must be 6-128 characters" }, 400);
+    }
+
+    if (db.users.find((u) => u.email === body.email)) {
+      audit(ip, method, url, 409, null);
+      return json(res, { error: "Email already registered" }, 409);
+    }
+
+    const newUser = {
+      id: `u-${randomUUID().slice(0, 8)}`,
+      email: body.email,
+      passwordHash: await hashPassword(body.password),
+      firstName: sanitizeStr(body.firstName) || null,
+      lastName: sanitizeStr(body.lastName) || null,
+      role: "user",
+      createdAt: new Date().toISOString(),
+      lastLogin: null,
+    };
+    db.users.push(newUser);
+    save();
+    const token = randomUUID();
+    sessions.set(hashToken(token), { userId: newUser.id, createdAt: Date.now() });
+    res.setHeader("Set-Cookie", `tm_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`);
+    audit(ip, method, url, 201, newUser.id);
+    return json(res, { id: newUser.id, email: newUser.email, firstName: newUser.firstName, lastName: newUser.lastName, role: newUser.role, createdAt: newUser.createdAt, updatedAt: newUser.createdAt }, 201);
+  }
+
+  if (method === "POST" && url === "/api/tm/auth/logout") {
+    if (sessionToken) destroySession(sessionToken);
+    res.setHeader("Set-Cookie", "tm_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, { ok: true });
+  }
+
+  // ── Passcodes ───────────────────────────────────────────────────────────
+  if (method === "GET" && url === "/api/passcodes") {
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, db.passcodes);
+  }
+
+  if (method === "POST" && url === "/api/passcodes") {
+    const body = await readBody(req);
+    const validTypes = ["single_test", "couple_test", "group_test", "child_3_5", "child_6_9", "preteen_10_12", "teen_13_17"];
+    if (!body.testType || !validTypes.includes(body.testType)) {
+      audit(ip, method, url, 400, sessionUserId);
+      return json(res, { error: "Invalid test type" }, 400);
+    }
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let code = "TM-";
+    for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+    const record = { code, testType: body.testType, status: "active", createdAt: new Date().toISOString(), usedAt: null, usedBy: null };
+    db.passcodes.push(record);
+    save();
+    audit(ip, method, url, 201, sessionUserId);
+    return json(res, record, 201);
+  }
+
+  if (method === "POST" && url === "/api/passcodes/validate") {
+    const body = await readBody(req);
+    if (!body.code || !body.testType) {
+      audit(ip, method, url, 400, sessionUserId);
+      return json(res, { error: "Code and testType are required" }, 400);
+    }
+    const match = db.passcodes.find((p) => p.code === body.code && p.status === "active" && p.testType === body.testType);
+    audit(ip, method, url, match ? 200 : 404, sessionUserId);
+    if (match) return json(res, { valid: true, passcode: match });
+    return json(res, { valid: false, message: "Invalid or expired passcode" });
+  }
+
+  // ── Tests ───────────────────────────────────────────────────────────────
+  if (method === "GET" && url === "/api/tests") {
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, []);
+  }
+
+  if (method === "POST" && url === "/api/tests") {
+    const body = await readBody(req);
+    if (!body.passcode) {
+      audit(ip, method, url, 400, sessionUserId);
+      return json(res, { error: "Passcode is required" }, 400);
+    }
+    const match = db.passcodes.find((p) => p.code === body.passcode && p.status === "active");
+    if (match) { match.status = "used"; match.usedAt = new Date().toISOString(); match.usedBy = sessionUserId || "anonymous"; save(); }
+    audit(ip, method, url, 201, sessionUserId);
+    return json(res, { id: randomUUID() }, 201);
+  }
+
+  if (method === "GET" && url.startsWith("/api/tests/")) {
+    const testId = url.split("/").pop();
+    if (!isValidId(testId)) {
+      audit(ip, method, url, 400, sessionUserId);
+      return json(res, { error: "Invalid test ID" }, 400);
+    }
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, { id: testId, testType: "single_test", status: "paid", paid: true, results: null, primaryTemp: null, secondaryTemp: null, blend: null, completedAt: null });
+  }
+
+  if (method === "PATCH" && url.startsWith("/api/tests/")) {
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, { ok: true });
+  }
+
+  // ── Reports ─────────────────────────────────────────────────────────────
+  if (method === "POST" && url.startsWith("/api/reports/generate/")) {
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, { reportUrl: null });
+  }
+
+  // ── Admin: Testimonials ─────────────────────────────────────────────────
+  if (method === "GET" && url === "/api/admin/testimonials") {
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, [...db.testimonials].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
+  }
+
+  if (method === "POST" && url === "/api/admin/testimonials") {
+    const body = await readBody(req);
+    const s = sanitizeObj(body);
+    if (!s.authorName || !s.text) {
+      audit(ip, method, url, 400, sessionUserId);
+      return json(res, { error: "authorName and text are required" }, 400);
+    }
+    const record = { id: `t-${randomUUID().slice(0, 8)}`, authorName: s.authorName, company: s.company || "", text: s.text, rating: Math.min(5, Math.max(1, Number(s.rating) || 5)), createdAt: new Date().toISOString() };
+    db.testimonials.push(record);
+    save();
+    audit(ip, method, url, 201, sessionUserId);
+    return json(res, record, 201);
+  }
+
+  if (method === "PUT" && url.match(/^\/api\/admin\/testimonials\/.+$/)) {
+    const id = url.split("/").pop();
+    if (!isValidId(id)) return json(res, { error: "Invalid ID" }, 400);
+    const body = await readBody(req);
+    const s = sanitizeObj(body);
+    const idx = db.testimonials.findIndex((t) => t.id === id);
+    if (idx === -1) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
+    db.testimonials[idx] = { ...db.testimonials[idx], ...s, id };
+    save();
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, db.testimonials[idx]);
+  }
+
+  if (method === "DELETE" && url.match(/^\/api\/admin\/testimonials\/.+$/)) {
+    const id = url.split("/").pop();
+    if (!isValidId(id)) return json(res, { error: "Invalid ID" }, 400);
+    const idx = db.testimonials.findIndex((t) => t.id === id);
+    if (idx === -1) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
+    db.testimonials.splice(idx, 1);
+    save();
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, { deleted: true });
+  }
+
+  // ── Admin: FAQs ─────────────────────────────────────────────────────────
+  if (method === "GET" && url === "/api/admin/faqs") {
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, [...db.faqs].sort((a, b) => a.order - b.order));
+  }
+
+  if (method === "POST" && url === "/api/admin/faqs") {
+    const body = await readBody(req);
+    const s = sanitizeObj(body);
+    if (!s.question || !s.answer) {
+      audit(ip, method, url, 400, sessionUserId);
+      return json(res, { error: "question and answer are required" }, 400);
+    }
+    const maxOrder = db.faqs.reduce((max, f) => Math.max(max, f.order), 0);
+    const record = { id: `f-${randomUUID().slice(0, 8)}`, question: s.question, answer: s.answer, order: maxOrder + 1, createdAt: new Date().toISOString() };
+    db.faqs.push(record);
+    save();
+    audit(ip, method, url, 201, sessionUserId);
+    return json(res, record, 201);
+  }
+
+  if (method === "PUT" && url.match(/^\/api\/admin\/faqs\/.+$/)) {
+    const id = url.split("/").pop();
+    if (!isValidId(id)) return json(res, { error: "Invalid ID" }, 400);
+    const body = await readBody(req);
+    const s = sanitizeObj(body);
+    const idx = db.faqs.findIndex((f) => f.id === id);
+    if (idx === -1) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
+    db.faqs[idx] = { ...db.faqs[idx], ...s, id };
+    save();
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, db.faqs[idx]);
+  }
+
+  if (method === "DELETE" && url.match(/^\/api\/admin\/faqs\/.+$/)) {
+    const id = url.split("/").pop();
+    if (!isValidId(id)) return json(res, { error: "Invalid ID" }, 400);
+    const idx = db.faqs.findIndex((f) => f.id === id);
+    if (idx === -1) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
+    db.faqs.splice(idx, 1);
+    save();
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, { deleted: true });
+  }
+
+  if (method === "PATCH" && url === "/api/admin/faqs/reorder") {
+    const body = await readBody(req);
+    if (!Array.isArray(body.ids)) {
+      audit(ip, method, url, 400, sessionUserId);
+      return json(res, { error: "ids array is required" }, 400);
+    }
+    body.ids.forEach((id, i) => { const f = db.faqs.find((f) => f.id === id); if (f) f.order = i + 1; });
+    save();
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, [...db.faqs].sort((a, b) => a.order - b.order));
+  }
+
+  // ── Admin: Features ─────────────────────────────────────────────────────
+  if (method === "GET" && url === "/api/admin/features") {
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, [...db.features].sort((a, b) => a.order - b.order));
+  }
+
+  if (method === "POST" && url === "/api/admin/features") {
+    const body = await readBody(req);
+    const s = sanitizeObj(body);
+    if (!s.title || !s.description) {
+      audit(ip, method, url, 400, sessionUserId);
+      return json(res, { error: "title and description are required" }, 400);
+    }
+    const maxOrder = db.features.reduce((max, f) => Math.max(max, f.order), 0);
+    const record = { id: `feat-${randomUUID().slice(0, 8)}`, title: s.title, description: s.description, icon: s.icon || "star", order: maxOrder + 1, createdAt: new Date().toISOString() };
+    db.features.push(record);
+    save();
+    audit(ip, method, url, 201, sessionUserId);
+    return json(res, record, 201);
+  }
+
+  if (method === "PUT" && url.match(/^\/api\/admin\/features\/.+$/)) {
+    const id = url.split("/").pop();
+    if (!isValidId(id)) return json(res, { error: "Invalid ID" }, 400);
+    const body = await readBody(req);
+    const s = sanitizeObj(body);
+    const idx = db.features.findIndex((f) => f.id === id);
+    if (idx === -1) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
+    db.features[idx] = { ...db.features[idx], ...s, id };
+    save();
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, db.features[idx]);
+  }
+
+  if (method === "DELETE" && url.match(/^\/api\/admin\/features\/.+$/)) {
+    const id = url.split("/").pop();
+    if (!isValidId(id)) return json(res, { error: "Invalid ID" }, 400);
+    const idx = db.features.findIndex((f) => f.id === id);
+    if (idx === -1) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
+    db.features.splice(idx, 1);
+    save();
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, { deleted: true });
+  }
+
+  if (method === "PATCH" && url === "/api/admin/features/reorder") {
+    const body = await readBody(req);
+    if (!Array.isArray(body.ids)) {
+      audit(ip, method, url, 400, sessionUserId);
+      return json(res, { error: "ids array is required" }, 400);
+    }
+    body.ids.forEach((id, i) => { const f = db.features.find((f) => f.id === id); if (f) f.order = i + 1; });
+    save();
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, [...db.features].sort((a, b) => a.order - b.order));
+  }
+
+  // ── Admin: Sessions ─────────────────────────────────────────────────────
+  if (method === "GET" && url === "/api/admin/sessions/stats") {
+    const total = db.testSessions.length;
+    const byStatus = {}, byType = {}, temperamentDistribution = {};
+    const userSet = new Set();
+    for (const s of db.testSessions) {
+      byStatus[s.status] = (byStatus[s.status] || 0) + 1;
+      byType[s.testType] = (byType[s.testType] || 0) + 1;
+      userSet.add(s.userId);
+      if (s.primaryTemp) temperamentDistribution[s.primaryTemp] = (temperamentDistribution[s.primaryTemp] || 0) + 1;
+      if (s.secondaryTemp) temperamentDistribution[s.secondaryTemp] = (temperamentDistribution[s.secondaryTemp] || 0) + 1;
+    }
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, { total, byStatus, byType, temperamentDistribution, totalUsers: userSet.size, totalPasscodesUsed: db.passcodes.filter((p) => p.status === "used").length, totalPasscodesGenerated: db.passcodes.length });
+  }
+
+  if (method === "GET" && url === "/api/admin/sessions") {
+    const params = parseQuery(req.url ?? "");
+    let result = [...db.testSessions];
+    if (params.status) result = result.filter((s) => s.status === params.status);
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, result.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
+  }
+
+  // ── Admin: Users ────────────────────────────────────────────────────────
+  if (method === "GET" && url === "/api/admin/users") {
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, db.users.map(({ passwordHash, ...u }) => u).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
+  }
+
+  audit(ip, method, url, 404, sessionUserId);
+  return false;
+}
+
+// ── Server ───────────────────────────────────────────────────────────────────
+
+async function main() {
+  await load(hashPassword);
+  console.log(`[store] database ready`);
+
+  const server = createServer(async (req, res) => {
+    try {
+      const ip = getClientIp(req);
+
+      // Rate limit
+      if (rateLimit(ip)) {
+        audit(ip, req.method, req.url, 429, null);
+        res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "60" });
+        return res.end(JSON.stringify({ error: "Too many requests" }));
+      }
+
+      // CORS
+      if (!handleCORS(req, res)) return;
+
+      // Security headers on every response
+      setSecurityHeaders(res, req.headers.origin);
+
+      if (req.url.startsWith("/api")) {
+        const handled = await handleAPI(req, res, ip);
+        if (handled === false) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Not found" }));
+        }
+      } else {
+        await serveStatic(req, res, req.headers["accept-encoding"] || "");
+      }
+    } catch (err) {
+      if (err.message === "BODY_TOO_LARGE") {
+        audit(getClientIp(req), req.method, req.url, 413, null);
+        res.writeHead(413, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: "Request body too large" }));
+      }
+      console.error(`[server] ${req.method} ${req.url} —`, err.message);
+      audit(getClientIp(req), req.method, req.url, 500, null);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    }
+  });
+
+  server.listen(PORT, () => {
+    console.log(`TemperaMap running at http://localhost:${PORT}`);
+  });
+
+  // ── Graceful shutdown ──────────────────────────────────────────────────
+  let shuttingDown = false;
+
+  async function shutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`\n[${signal}] shutting down…`);
+
+    server.close(async () => {
+      console.log("[server] closed");
+      const { flush } = await import("./lib/store.mjs");
+      await flush();
+      console.log("[store] flushed to disk");
+      process.exit(0);
+    });
+
+    setTimeout(() => {
+      console.error("[server] forced exit after timeout");
+      process.exit(1);
+    }, 10_000).unref();
+  }
+
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+}
+
+main().catch((err) => {
+  console.error("[fatal]", err);
+  process.exit(1);
+});
