@@ -1,2 +1,0 @@
-build: pnpm install && pnpm build
-start: pnpm start
