@@ -123,7 +123,7 @@ INSERT INTO features (id, title, description, icon, sort_order, created_at)
 VALUES
   ('v-001', 'Four Temperaments',       'Discover your unique blend of Sanguine, Choleric, Melancholic, and Phlegmatic temperaments.', 'layers',     0, '2026-05-15T08:00:00.000Z'),
   ('v-002', 'Couple Analysis',         'Compare temperaments side-by-side to strengthen your closest relationships.',               'heart',      1, '2026-05-15T08:00:00.000Z'),
-  ('v-003', 'Team Dashboard',          'Get a bird's-eye view of your entire team's temperament composition.',                     'users',      2, '2026-05-15T08:00:00.000Z'),
+  ('v-003', 'Team Dashboard',          'Get a bird''s-eye view of your entire team''s temperament composition.',                     'users',      2, '2026-05-15T08:00:00.000Z'),
   ('v-004', 'PDF Reports',             'Download beautifully designed, shareable PDF reports of your results.',                     'file-text',  3, '2026-05-15T08:00:00.000Z'),
   ('v-005', 'Secure & Private',        'Your data is encrypted and never shared with third parties.',                              'shield',     4, '2026-05-15T08:00:00.000Z')
 ON CONFLICT (id) DO NOTHING;
