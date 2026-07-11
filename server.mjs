@@ -506,7 +506,8 @@ async function handleAPI(req, res, ip) {
   // ── Google OAuth ────────────────────────────────────────────────────────
   if (method === "GET" && url === "/api/auth/google") {
     const clientId = process.env.GOOGLE_CLIENT_ID;
-    const redirectUri = `${req.headers.host?.includes("localhost") ? "http" : "https"}://${req.headers.host}/api/auth/google/callback`;
+    const appUrl = process.env.APP_URL || `https://${req.headers.host}`;
+    const redirectUri = `${appUrl}/api/auth/google/callback`;
     const scope = "openid email profile";
     const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(scope)}&access_type=offline&prompt=consent`;
     res.writeHead(302, { Location: authUrl });
@@ -516,15 +517,17 @@ async function handleAPI(req, res, ip) {
   if (method === "GET" && url === "/api/auth/google/callback") {
     const parsedUrl = new URL(url, `https://${req.headers.host}`);
     const code = parsedUrl.searchParams.get("code");
-    const error = parsedUrl.searchParams.get("error");
+    const errorParam = parsedUrl.searchParams.get("error");
 
-    if (error || !code) {
+    if (errorParam || !code) {
+      console.log(`[google-oauth] denied: error=${errorParam} code=${code}`);
       res.writeHead(302, { Location: "/sign-in?error=google_denied" });
       return res.end();
     }
 
     try {
-      const redirectUri = `${req.headers.host?.includes("localhost") ? "http" : "https"}://${req.headers.host}/api/auth/google/callback`;
+      const appUrl = process.env.APP_URL || `https://${req.headers.host}`;
+      const redirectUri = `${appUrl}/api/auth/google/callback`;
       const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
