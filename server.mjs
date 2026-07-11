@@ -4,7 +4,7 @@ import { readFile, stat } from "node:fs/promises";
 import { join, extname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createGzip } from "node:zlib";
-import { load, getDb, save } from "./lib/store.mjs";
+import * as db from "./lib/db.mjs";
 import { hashPassword, verifyPassword } from "./lib/crypto.mjs";
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -350,7 +350,6 @@ async function serveStatic(req, res, acceptEncoding) {
 async function handleAPI(req, res, ip) {
   const url = (req.url ?? "").split("?")[0];
   const method = req.method;
-  const db = getDb();
   const cookies = parseCookies(req.headers.cookie);
   const sessionToken = cookies.tm_session;
   const sessionUserId = getSessionUserId(sessionToken);
@@ -364,7 +363,7 @@ async function handleAPI(req, res, ip) {
   // ── Audit log (admin only) ─────────────────────────────────────────────
   if (method === "GET" && url === "/api/admin/audit") {
     if (!sessionUserId) return json(res, { error: "Unauthorized" }, 401);
-    const user = db.users.find((u) => u.id === sessionUserId);
+    const user = await db.findUserById(sessionUserId);
     if (!user || user.role !== "admin") return json(res, { error: "Forbidden" }, 403);
     audit(ip, method, url, 200, sessionUserId);
     return json(res, auditLog.slice(-200));
@@ -376,7 +375,7 @@ async function handleAPI(req, res, ip) {
       audit(ip, method, url, 200, null);
       return json(res, null);
     }
-    const user = db.users.find((u) => u.id === sessionUserId);
+    const user = await db.findUserById(sessionUserId);
     if (!user) {
       audit(ip, method, url, 200, null);
       return json(res, null);
@@ -413,7 +412,7 @@ async function handleAPI(req, res, ip) {
       return json(res, { error: "Too many login attempts. Try again later." }, 429);
     }
 
-    const user = db.users.find((u) => u.email === body.email);
+    const user = await db.findUserByEmail(body.email);
     if (!user || !(await verifyPassword(body.password, user.passwordHash))) {
       const count = Math.max(recordLoginFail(`ip:${ip}`), recordLoginFail(`email:${body.email}`));
       audit(ip, method, url, 401, null);
@@ -425,8 +424,7 @@ async function handleAPI(req, res, ip) {
 
     const token = randomUUID();
     sessions.set(hashToken(token), { userId: user.id, createdAt: Date.now() });
-    user.lastLogin = new Date().toISOString();
-    save();
+    await db.updateUserLastLogin(user.id);
     res.setHeader("Set-Cookie", `tm_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`);
     audit(ip, method, url, 200, user.id);
     return json(res, { id: user.id, email: user.email, firstName: user.firstName, lastName: user.lastName, role: user.role, createdAt: user.createdAt, updatedAt: user.createdAt });
@@ -449,7 +447,7 @@ async function handleAPI(req, res, ip) {
       return json(res, { error: "Password must be 6-128 characters" }, 400);
     }
 
-    if (db.users.find((u) => u.email === body.email)) {
+    if (await db.findUserByEmail(body.email)) {
       audit(ip, method, url, 409, null);
       return json(res, { error: "Email already registered" }, 409);
     }
@@ -464,8 +462,7 @@ async function handleAPI(req, res, ip) {
       createdAt: new Date().toISOString(),
       lastLogin: null,
     };
-    db.users.push(newUser);
-    save();
+    await db.createUser(newUser);
     const token = randomUUID();
     sessions.set(hashToken(token), { userId: newUser.id, createdAt: Date.now() });
     res.setHeader("Set-Cookie", `tm_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`);
@@ -483,7 +480,7 @@ async function handleAPI(req, res, ip) {
   // ── Passcodes ───────────────────────────────────────────────────────────
   if (method === "GET" && url === "/api/passcodes") {
     audit(ip, method, url, 200, sessionUserId);
-    return json(res, db.passcodes);
+    return json(res, await db.listPasscodes());
   }
 
   if (method === "POST" && url === "/api/passcodes") {
@@ -497,8 +494,7 @@ async function handleAPI(req, res, ip) {
     let code = "TM-";
     for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
     const record = { code, testType: body.testType, status: "active", createdAt: new Date().toISOString(), usedAt: null, usedBy: null };
-    db.passcodes.push(record);
-    save();
+    await db.createPasscode(record);
     audit(ip, method, url, 201, sessionUserId);
     return json(res, record, 201);
   }
@@ -509,7 +505,7 @@ async function handleAPI(req, res, ip) {
       audit(ip, method, url, 400, sessionUserId);
       return json(res, { error: "Code and testType are required" }, 400);
     }
-    const match = db.passcodes.find((p) => p.code === body.code && p.status === "active" && p.testType === body.testType);
+    const match = await db.findPasscode(body.code, body.testType);
     audit(ip, method, url, match ? 200 : 404, sessionUserId);
     if (match) return json(res, { valid: true, passcode: match });
     return json(res, { valid: false, message: "Invalid or expired passcode" });
@@ -527,8 +523,8 @@ async function handleAPI(req, res, ip) {
       audit(ip, method, url, 400, sessionUserId);
       return json(res, { error: "Passcode is required" }, 400);
     }
-    const match = db.passcodes.find((p) => p.code === body.passcode && p.status === "active");
-    if (match) { match.status = "used"; match.usedAt = new Date().toISOString(); match.usedBy = sessionUserId || "anonymous"; save(); }
+    const match = await db.findPasscodeByCode(body.passcode);
+    if (match) await db.usePasscode(match.code, sessionUserId || "anonymous");
     audit(ip, method, url, 201, sessionUserId);
     return json(res, { id: randomUUID() }, 201);
   }
@@ -557,7 +553,7 @@ async function handleAPI(req, res, ip) {
   // ── Admin: Testimonials ─────────────────────────────────────────────────
   if (method === "GET" && url === "/api/admin/testimonials") {
     audit(ip, method, url, 200, sessionUserId);
-    return json(res, [...db.testimonials].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
+    return json(res, await db.listTestimonials());
   }
 
   if (method === "POST" && url === "/api/admin/testimonials") {
@@ -568,8 +564,7 @@ async function handleAPI(req, res, ip) {
       return json(res, { error: "authorName and text are required" }, 400);
     }
     const record = { id: `t-${randomUUID().slice(0, 8)}`, authorName: s.authorName, company: s.company || "", text: s.text, rating: Math.min(5, Math.max(1, Number(s.rating) || 5)), createdAt: new Date().toISOString() };
-    db.testimonials.push(record);
-    save();
+    await db.createTestimonial(record);
     audit(ip, method, url, 201, sessionUserId);
     return json(res, record, 201);
   }
@@ -579,21 +574,19 @@ async function handleAPI(req, res, ip) {
     if (!isValidId(id)) return json(res, { error: "Invalid ID" }, 400);
     const body = await readBody(req);
     const s = sanitizeObj(body);
-    const idx = db.testimonials.findIndex((t) => t.id === id);
-    if (idx === -1) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
-    db.testimonials[idx] = { ...db.testimonials[idx], ...s, id };
-    save();
+    const existing = await db.findTestimonialById(id);
+    if (!existing) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
+    await db.updateTestimonial(id, s);
     audit(ip, method, url, 200, sessionUserId);
-    return json(res, db.testimonials[idx]);
+    return json(res, { ...existing, ...s, id });
   }
 
   if (method === "DELETE" && url.match(/^\/api\/admin\/testimonials\/.+$/)) {
     const id = url.split("/").pop();
     if (!isValidId(id)) return json(res, { error: "Invalid ID" }, 400);
-    const idx = db.testimonials.findIndex((t) => t.id === id);
-    if (idx === -1) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
-    db.testimonials.splice(idx, 1);
-    save();
+    const existing = await db.findTestimonialById(id);
+    if (!existing) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
+    await db.deleteTestimonial(id);
     audit(ip, method, url, 200, sessionUserId);
     return json(res, { deleted: true });
   }
@@ -601,7 +594,7 @@ async function handleAPI(req, res, ip) {
   // ── Admin: FAQs ─────────────────────────────────────────────────────────
   if (method === "GET" && url === "/api/admin/faqs") {
     audit(ip, method, url, 200, sessionUserId);
-    return json(res, [...db.faqs].sort((a, b) => a.order - b.order));
+    return json(res, await db.listFaqs());
   }
 
   if (method === "POST" && url === "/api/admin/faqs") {
@@ -611,10 +604,9 @@ async function handleAPI(req, res, ip) {
       audit(ip, method, url, 400, sessionUserId);
       return json(res, { error: "question and answer are required" }, 400);
     }
-    const maxOrder = db.faqs.reduce((max, f) => Math.max(max, f.order), 0);
+    const maxOrder = await db.getMaxFaqOrder();
     const record = { id: `f-${randomUUID().slice(0, 8)}`, question: s.question, answer: s.answer, order: maxOrder + 1, createdAt: new Date().toISOString() };
-    db.faqs.push(record);
-    save();
+    await db.createFaq(record);
     audit(ip, method, url, 201, sessionUserId);
     return json(res, record, 201);
   }
@@ -624,21 +616,19 @@ async function handleAPI(req, res, ip) {
     if (!isValidId(id)) return json(res, { error: "Invalid ID" }, 400);
     const body = await readBody(req);
     const s = sanitizeObj(body);
-    const idx = db.faqs.findIndex((f) => f.id === id);
-    if (idx === -1) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
-    db.faqs[idx] = { ...db.faqs[idx], ...s, id };
-    save();
+    const existing = await db.findFaqById(id);
+    if (!existing) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
+    await db.updateFaq(id, s);
     audit(ip, method, url, 200, sessionUserId);
-    return json(res, db.faqs[idx]);
+    return json(res, { ...existing, ...s, id });
   }
 
   if (method === "DELETE" && url.match(/^\/api\/admin\/faqs\/.+$/)) {
     const id = url.split("/").pop();
     if (!isValidId(id)) return json(res, { error: "Invalid ID" }, 400);
-    const idx = db.faqs.findIndex((f) => f.id === id);
-    if (idx === -1) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
-    db.faqs.splice(idx, 1);
-    save();
+    const existing = await db.findFaqById(id);
+    if (!existing) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
+    await db.deleteFaq(id);
     audit(ip, method, url, 200, sessionUserId);
     return json(res, { deleted: true });
   }
@@ -649,16 +639,15 @@ async function handleAPI(req, res, ip) {
       audit(ip, method, url, 400, sessionUserId);
       return json(res, { error: "ids array is required" }, 400);
     }
-    body.ids.forEach((id, i) => { const f = db.faqs.find((f) => f.id === id); if (f) f.order = i + 1; });
-    save();
+    await db.reorderFaqs(body.ids);
     audit(ip, method, url, 200, sessionUserId);
-    return json(res, [...db.faqs].sort((a, b) => a.order - b.order));
+    return json(res, await db.listFaqs());
   }
 
   // ── Admin: Features ─────────────────────────────────────────────────────
   if (method === "GET" && url === "/api/admin/features") {
     audit(ip, method, url, 200, sessionUserId);
-    return json(res, [...db.features].sort((a, b) => a.order - b.order));
+    return json(res, await db.listFeatures());
   }
 
   if (method === "POST" && url === "/api/admin/features") {
@@ -668,10 +657,9 @@ async function handleAPI(req, res, ip) {
       audit(ip, method, url, 400, sessionUserId);
       return json(res, { error: "title and description are required" }, 400);
     }
-    const maxOrder = db.features.reduce((max, f) => Math.max(max, f.order), 0);
+    const maxOrder = await db.getMaxFeatureOrder();
     const record = { id: `feat-${randomUUID().slice(0, 8)}`, title: s.title, description: s.description, icon: s.icon || "star", order: maxOrder + 1, createdAt: new Date().toISOString() };
-    db.features.push(record);
-    save();
+    await db.createFeature(record);
     audit(ip, method, url, 201, sessionUserId);
     return json(res, record, 201);
   }
@@ -681,21 +669,19 @@ async function handleAPI(req, res, ip) {
     if (!isValidId(id)) return json(res, { error: "Invalid ID" }, 400);
     const body = await readBody(req);
     const s = sanitizeObj(body);
-    const idx = db.features.findIndex((f) => f.id === id);
-    if (idx === -1) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
-    db.features[idx] = { ...db.features[idx], ...s, id };
-    save();
+    const existing = await db.findFeatureById(id);
+    if (!existing) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
+    await db.updateFeature(id, s);
     audit(ip, method, url, 200, sessionUserId);
-    return json(res, db.features[idx]);
+    return json(res, { ...existing, ...s, id });
   }
 
   if (method === "DELETE" && url.match(/^\/api\/admin\/features\/.+$/)) {
     const id = url.split("/").pop();
     if (!isValidId(id)) return json(res, { error: "Invalid ID" }, 400);
-    const idx = db.features.findIndex((f) => f.id === id);
-    if (idx === -1) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
-    db.features.splice(idx, 1);
-    save();
+    const existing = await db.findFeatureById(id);
+    if (!existing) { audit(ip, method, url, 404, sessionUserId); return json(res, { error: "Not found" }, 404); }
+    await db.deleteFeature(id);
     audit(ip, method, url, 200, sessionUserId);
     return json(res, { deleted: true });
   }
@@ -706,40 +692,29 @@ async function handleAPI(req, res, ip) {
       audit(ip, method, url, 400, sessionUserId);
       return json(res, { error: "ids array is required" }, 400);
     }
-    body.ids.forEach((id, i) => { const f = db.features.find((f) => f.id === id); if (f) f.order = i + 1; });
-    save();
+    await db.reorderFeatures(body.ids);
     audit(ip, method, url, 200, sessionUserId);
-    return json(res, [...db.features].sort((a, b) => a.order - b.order));
+    return json(res, await db.listFeatures());
   }
 
   // ── Admin: Sessions ─────────────────────────────────────────────────────
   if (method === "GET" && url === "/api/admin/sessions/stats") {
-    const total = db.testSessions.length;
-    const byStatus = {}, byType = {}, temperamentDistribution = {};
-    const userSet = new Set();
-    for (const s of db.testSessions) {
-      byStatus[s.status] = (byStatus[s.status] || 0) + 1;
-      byType[s.testType] = (byType[s.testType] || 0) + 1;
-      userSet.add(s.userId);
-      if (s.primaryTemp) temperamentDistribution[s.primaryTemp] = (temperamentDistribution[s.primaryTemp] || 0) + 1;
-      if (s.secondaryTemp) temperamentDistribution[s.secondaryTemp] = (temperamentDistribution[s.secondaryTemp] || 0) + 1;
-    }
+    const stats = await db.getTestSessionStats();
     audit(ip, method, url, 200, sessionUserId);
-    return json(res, { total, byStatus, byType, temperamentDistribution, totalUsers: userSet.size, totalPasscodesUsed: db.passcodes.filter((p) => p.status === "used").length, totalPasscodesGenerated: db.passcodes.length });
+    return json(res, stats);
   }
 
   if (method === "GET" && url === "/api/admin/sessions") {
     const params = parseQuery(req.url ?? "");
-    let result = [...db.testSessions];
-    if (params.status) result = result.filter((s) => s.status === params.status);
+    const result = await db.listTestSessions(params.status);
     audit(ip, method, url, 200, sessionUserId);
-    return json(res, result.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
+    return json(res, result);
   }
 
   // ── Admin: Users ────────────────────────────────────────────────────────
   if (method === "GET" && url === "/api/admin/users") {
     audit(ip, method, url, 200, sessionUserId);
-    return json(res, db.users.map(({ passwordHash, ...u }) => u).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
+    return json(res, (await db.listUsers()).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
   }
 
   audit(ip, method, url, 404, sessionUserId);
@@ -749,8 +724,8 @@ async function handleAPI(req, res, ip) {
 // ── Server ───────────────────────────────────────────────────────────────────
 
 async function main() {
-  await load(hashPassword);
-  console.log(`[store] database ready`);
+  await db.seedIfNeeded(hashPassword);
+  console.log(`[db] database ready`);
 
   const server = createServer(async (req, res) => {
     try {
@@ -805,11 +780,8 @@ async function main() {
     shuttingDown = true;
     console.log(`\n[${signal}] shutting down…`);
 
-    server.close(async () => {
+    server.close(() => {
       console.log("[server] closed");
-      const { flush } = await import("./lib/store.mjs");
-      await flush();
-      console.log("[store] flushed to disk");
       process.exit(0);
     });
 
