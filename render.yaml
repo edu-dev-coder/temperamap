@@ -1,2 +1,25 @@
-build: pnpm install && pnpm build
-start: pnpm start
+services:
+  - type: web
+    name: temperamap
+    runtime: node
+    buildCommand: rm -rf dist && npm install -g pnpm && pnpm install --frozen-lockfile && pnpm build
+    startCommand: node server.mjs
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: VITE_ADMIN_PASSWORD
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DEFAULT_USER_PASSWORD
+        value: password123
+      - key: APP_URL
+        value: https://temperamap.onrender.com
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
