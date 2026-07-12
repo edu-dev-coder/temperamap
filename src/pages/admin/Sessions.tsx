@@ -220,7 +220,7 @@ export default function AdminSessions() {
                             variant="ghost"
                             size="icon"
                             onClick={() => {
-                              window.location.href = `/results/${s.id}`;
+                              window.location.href = `/admin/results/${s.id}`;
                             }}
                             title="View full results"
                           >
@@ -343,7 +343,7 @@ export default function AdminSessions() {
                 <Button
                   className="w-full bg-primary hover:bg-primary/90"
                   onClick={() => {
-                    window.location.href = `/results/${detailSession.id}`;
+                    window.location.href = `/admin/results/${detailSession.id}`;
                   }}
                 >
                   <ExternalLink className="h-4 w-4 mr-2" />

@@ -123,6 +123,9 @@ function AppRoutes() {
           <Route path="/admin/sessions">
             <AdminGate><LazyRoute><AdminSessions /></LazyRoute></AdminGate>
           </Route>
+          <Route path="/admin/results/:sessionId">
+            <AdminGate><LazyRoute><Results /></LazyRoute></AdminGate>
+          </Route>
           <Route path="/admin/users">
             <AdminGate><LazyRoute><AdminUsers /></LazyRoute></AdminGate>
           </Route>
