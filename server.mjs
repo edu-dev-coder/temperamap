@@ -595,7 +595,7 @@ async function handleAPI(req, res, ip) {
 
   if (method === "POST" && url === "/api/passcodes") {
     const body = await readBody(req);
-    const validTypes = ["single_test", "couple_test", "group_test", "child_3_5", "child_6_9", "preteen_10_12", "teen_13_17"];
+    const validTypes = ["single_test", "couple_test", "corporate_team", "group_test", "child_3_5", "child_6_9", "preteen_10_12", "teen_13_17"];
     if (!body.testType || !validTypes.includes(body.testType)) {
       audit(ip, method, url, 400, sessionUserId);
       return json(res, { error: "Invalid test type" }, 400);
