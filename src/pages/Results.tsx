@@ -222,23 +222,148 @@ export default function Results() {
   });
 
   const handleDownloadPdf = async () => {
-    if (!sessionId) return;
+    if (!sessionId || !session) return;
     setGeneratingPdf(true);
     try {
-      const r = await fetch(`/api/reports/generate/${sessionId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userName: user?.firstName && user?.lastName
-            ? `${user.firstName} ${user.lastName}`
-            : user?.firstName || user?.email || "User",
-        }),
-      });
-      if (!r.ok) throw new Error("Generation failed");
-      const report = await r.json() as { reportUrl?: string };
-      if (report.reportUrl) {
-        window.open(report.reportUrl, "_blank");
+      const { jsPDF } = await import("jspdf");
+      const doc = new jsPDF({ unit: "mm", format: "a4" });
+      const w = doc.internal.pageSize.getWidth();
+      const margin = 20;
+      const contentW = w - margin * 2;
+      let y = 20;
+
+      const addText = (text: string, size: number, isBold = false, color: [number, number, number] = [0, 0, 0]) => {
+        doc.setFontSize(size);
+        doc.setFont("helvetica", isBold ? "bold" : "normal");
+        doc.setTextColor(...color);
+        const lines = doc.splitTextToSize(text, contentW);
+        for (const line of lines) {
+          if (y > 270) { doc.addPage(); y = 20; }
+          doc.text(line, margin, y);
+          y += size * 0.5;
+        }
+        y += 2;
+      };
+
+      const userName = user?.firstName && user?.lastName
+        ? `${user.firstName} ${user.lastName}`
+        : user?.firstName || user?.email || "User";
+
+      // Title page
+      doc.setFillColor(30, 69, 128);
+      doc.rect(0, 0, w, 60, "F");
+      y = 25;
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(24);
+      doc.setFont("helvetica", "bold");
+      doc.text("TemperaMap Assessment Report", margin, y);
+      y += 10;
+      doc.setFontSize(12);
+      doc.setFont("helvetica", "normal");
+      doc.text(`Prepared for ${userName}`, margin, y);
+      y += 8;
+      doc.setFontSize(10);
+      doc.text(new Date().toLocaleDateString("en-NG", { day: "numeric", month: "long", year: "numeric" }), margin, y);
+      y = 75;
+
+      // Temperament result
+      const tempColor: [number, number, number] = primary === "Sanguine" ? [217, 119, 6] : primary === "Choleric" ? [220, 38, 38] : primary === "Melancholic" ? [37, 99, 235] : [22, 163, 74];
+      addText(`Primary Temperament: ${primary}`, 18, true, tempColor);
+      if (secondary) addText(`Secondary Temperament: ${secondary}`, 14, true, [100, 100, 100]);
+      if (blend) addText(`Blend: ${blend}`, 12, false, [80, 80, 80]);
+      y += 5;
+
+      // Description
+      if (info) {
+        addText("About Your Temperament", 14, true, [30, 69, 128]);
+        addText(info.description, 10);
+        y += 3;
       }
+
+      // Score breakdown
+      if (results && Object.keys(results).length > 0) {
+        addText("Score Breakdown", 14, true, [30, 69, 128]);
+        const maxScore = usesChildScoring(testType) ? 75 : 60;
+        const sorted = Object.entries(results).sort((a, b) => b[1] - a[1]);
+        for (const [temp, score] of sorted) {
+          const pct = Math.round((score / maxScore) * 100);
+          const barW = contentW * 0.6;
+          const barX = margin + contentW * 0.35;
+          doc.setFontSize(10);
+          doc.setFont("helvetica", "bold");
+          doc.setTextColor(50, 50, 50);
+          doc.text(`${temp}${temp === primary ? " *" : ""}`, margin, y);
+          doc.setFont("helvetica", "normal");
+          doc.text(`${pct}%`, barX + barW + 3, y);
+          y += 1;
+          doc.setFillColor(230, 230, 230);
+          doc.roundedRect(margin, y - 3, barW, 4, 2, 2, "F");
+          const tempC: [number, number, number] = temp === "Sanguine" ? [217, 119, 6] : temp === "Choleric" ? [220, 38, 38] : temp === "Melancholic" ? [37, 99, 235] : [22, 163, 74];
+          doc.setFillColor(...tempC);
+          doc.roundedRect(margin, y - 3, barW * (pct / 100), 4, 2, 2, "F");
+          y += 7;
+        }
+        y += 5;
+      }
+
+      // Strengths
+      if (info?.strengths) {
+        addText("Key Strengths", 14, true, [30, 69, 128]);
+        for (const s of info.strengths) {
+          addText(`• ${s}`, 10);
+        }
+        y += 3;
+      }
+
+      // Growth areas
+      if (info?.growth) {
+        addText("Growth Opportunities", 14, true, [30, 69, 128]);
+        for (const g of info.growth) {
+          addText(`• ${g}`, 10);
+        }
+        y += 3;
+      }
+
+      // Relationships
+      if (info?.relationships) {
+        addText("Relationships & Love", 14, true, [30, 69, 128]);
+        addText(info.relationships, 10);
+        y += 3;
+      }
+
+      // Emotional profile
+      if (info?.emotionalProfile) {
+        if (y > 230) { doc.addPage(); y = 20; }
+        addText("Emotional Profile", 14, true, [30, 69, 128]);
+        addText(`Anger Style: ${info.emotionalProfile.angerStyle}`, 10);
+        addText(`Under Stress: ${info.emotionalProfile.underStress}`, 10);
+        addText(`Core Fear: ${info.emotionalProfile.coreFear}`, 10);
+        addText(`Core Need: ${info.emotionalProfile.coreNeed}`, 10);
+        y += 3;
+      }
+
+      // Child guidance (for child tests)
+      if (isChildTest(testType) && guidance) {
+        if (y > 200) { doc.addPage(); y = 20; }
+        addText("Parenting Guide", 14, true, [30, 69, 128]);
+        addText(`Learning Style: ${guidance.learning.style}`, 10);
+        addText(`Discipline: ${guidance.discipline.why}`, 10);
+        addText(`Love Language: ${guidance.love.bestLanguage}`, 10);
+        addText(`What Hurts Them: ${guidance.hurts}`, 10);
+        y += 3;
+      }
+
+      // Footer
+      const pageCount = doc.getNumberOfPages();
+      for (let i = 1; i <= pageCount; i++) {
+        doc.setPage(i);
+        doc.setFontSize(8);
+        doc.setTextColor(150, 150, 150);
+        doc.text("TemperaMap Assessment — For self-insight only, not a clinical diagnosis.", margin, 290);
+        doc.text(`Page ${i} of ${pageCount}`, w - margin - 20, 290);
+      }
+
+      doc.save(`TemperaMap-${primary}-Report.pdf`);
     } catch {
       toast({ title: "Error", description: "Could not generate PDF. Please try again.", variant: "destructive" });
     } finally {

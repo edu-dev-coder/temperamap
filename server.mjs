@@ -623,8 +623,18 @@ async function handleAPI(req, res, ip) {
 
   // ── Tests ───────────────────────────────────────────────────────────────
   if (method === "GET" && url === "/api/tests") {
-    audit(ip, method, url, 200, sessionUserId);
-    return json(res, []);
+    const parsed = new URL(url, `http://${req.headers.host || "localhost"}`);
+    const userId = parsed.searchParams.get("userId");
+    try {
+      const tests = userId
+        ? await db.listTestSessionsByUserId(userId)
+        : [];
+      audit(ip, method, url, 200, sessionUserId);
+      return json(res, tests);
+    } catch (e) {
+      audit(ip, method, url, 500, sessionUserId);
+      return json(res, { error: "Failed to load sessions" }, 500);
+    }
   }
 
   if (method === "POST" && url === "/api/tests") {

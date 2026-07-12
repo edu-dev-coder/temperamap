@@ -2,7 +2,7 @@ services:
   - type: web
     name: temperamap
     runtime: node
-    buildCommand: rm -rf dist && npm install -g pnpm && pnpm install --frozen-lockfile && pnpm build
+    buildCommand: npm install -g pnpm && pnpm install --ignore-scripts && pnpm build
     startCommand: node server.mjs
     envVars:
       - key: NODE_ENV
