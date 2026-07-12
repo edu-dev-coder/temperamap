@@ -65,6 +65,15 @@ const TESTS = [
     popular: false,
   },
   {
+    product: "group_test",
+    testType: "group_test",
+    title: "Group Assessment",
+    emoji: "👥",
+    desc: "For any group — family, church, friends, or community. Each member takes the assessment and results are compared across the group.",
+    highlights: ["Multiple members under one passcode", "Individual temperament results", "Group dynamic overview", "Communication insights", "Relationship patterns"],
+    popular: false,
+  },
+  {
     product: "corporate_team",
     testType: "corporate_team",
     title: "Corporate Team",
