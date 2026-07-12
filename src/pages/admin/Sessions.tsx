@@ -29,6 +29,10 @@ interface Session {
   userEmail: string;
   testType: string;
   status: "pending" | "paid" | "in_progress" | "completed";
+  primaryTemp: string | null;
+  secondaryTemp: string | null;
+  blend: string | null;
+  results: Record<string, number> | null;
   createdAt: string;
   completedAt: string | null;
 }
@@ -65,6 +69,13 @@ const TYPE_LABELS: Record<string, string> = {
   corporate_team: "Corporate Team",
 };
 
+const TEMP_COLOR: Record<string, string> = {
+  Sanguine: "text-amber-600",
+  Choleric: "text-red-600",
+  Melancholic: "text-blue-600",
+  Phlegmatic: "text-green-600",
+};
+
 export default function AdminSessions() {
   const { toast } = useToast();
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -91,6 +102,36 @@ export default function AdminSessions() {
 
   return (
     <AdminLayout title="Test Sessions">
+      {/* Summary stats */}
+      {sessions.length > 0 && (
+        <div className="mb-6 grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <Card className="bg-primary/5 border-primary/20">
+            <CardContent className="p-3 text-center">
+              <p className="text-2xl font-black text-primary">{sessions.length}</p>
+              <p className="text-xs text-muted-foreground">Total Sessions</p>
+            </CardContent>
+          </Card>
+          <Card className="bg-green-50 border-green-200">
+            <CardContent className="p-3 text-center">
+              <p className="text-2xl font-black text-green-600">{sessions.filter(s => s.status === "completed").length}</p>
+              <p className="text-xs text-muted-foreground">Completed</p>
+            </CardContent>
+          </Card>
+          <Card className="bg-amber-50 border-amber-200">
+            <CardContent className="p-3 text-center">
+              <p className="text-2xl font-black text-amber-600">{sessions.filter(s => s.primaryTemp === "Sanguine").length + sessions.filter(s => s.primaryTemp === "Choleric").length + sessions.filter(s => s.primaryTemp === "Melancholic").length + sessions.filter(s => s.primaryTemp === "Phlegmatic").length}</p>
+              <p className="text-xs text-muted-foreground">With Results</p>
+            </CardContent>
+          </Card>
+          <Card className="bg-blue-50 border-blue-200">
+            <CardContent className="p-3 text-center">
+              <p className="text-2xl font-black text-blue-600">{new Set(sessions.map(s => s.userId)).size}</p>
+              <p className="text-xs text-muted-foreground">Unique Users</p>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
       {/* Filter buttons */}
       <div className="mb-6 flex flex-wrap gap-2">
         {STATUS_FILTERS.map((f) => (
@@ -128,6 +169,7 @@ export default function AdminSessions() {
                   <TableHead>User</TableHead>
                   <TableHead className="hidden md:table-cell">Email</TableHead>
                   <TableHead>Test Type</TableHead>
+                  <TableHead className="hidden sm:table-cell">Result</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="hidden lg:table-cell">Created</TableHead>
                   <TableHead className="hidden lg:table-cell">Completed</TableHead>
@@ -142,6 +184,16 @@ export default function AdminSessions() {
                       {s.userEmail || "—"}
                     </TableCell>
                     <TableCell>{TYPE_LABELS[s.testType] ?? s.testType}</TableCell>
+                    <TableCell className="hidden sm:table-cell">
+                      {s.primaryTemp ? (
+                        <span className={`text-sm font-semibold ${TEMP_COLOR[s.primaryTemp] ?? ""}`}>
+                          {s.primaryTemp}
+                          {s.secondaryTemp ? <span className="text-muted-foreground font-normal"> / {s.secondaryTemp}</span> : null}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground text-xs">—</span>
+                      )}
+                    </TableCell>
                     <TableCell>
                       <Badge variant="outline" className={STATUS_STYLES[s.status] ?? ""}>
                         {STATUS_LABELS[s.status] ?? s.status}
@@ -159,6 +211,7 @@ export default function AdminSessions() {
                           variant="ghost"
                           size="icon"
                           onClick={() => setDetailSession(s)}
+                          title="View details"
                         >
                           <Eye className="h-4 w-4" />
                         </Button>
@@ -169,6 +222,7 @@ export default function AdminSessions() {
                             onClick={() => {
                               window.location.href = `/results/${s.id}`;
                             }}
+                            title="View full results"
                           >
                             <ExternalLink className="h-4 w-4" />
                           </Button>
@@ -185,41 +239,117 @@ export default function AdminSessions() {
 
       {/* Detail Dialog */}
       <Dialog open={!!detailSession} onOpenChange={(open) => { if (!open) setDetailSession(null); }}>
-        <DialogContent>
+        <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Session Details</DialogTitle>
+            <DialogTitle>Session Results</DialogTitle>
             <DialogDescription>
-              Viewing session {detailSession?.id}
+              {detailSession?.id} — {TYPE_LABELS[detailSession?.testType ?? ""] ?? detailSession?.testType}
             </DialogDescription>
           </DialogHeader>
           {detailSession && (
-            <div className="space-y-3 text-sm">
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">User</span>
-                <span className="font-medium">{detailSession.userName || "—"}</span>
+            <div className="space-y-4 text-sm">
+              {/* User info */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-muted/50 rounded-lg p-3">
+                  <p className="text-xs text-muted-foreground mb-0.5">User</p>
+                  <p className="font-medium">{detailSession.userName || "—"}</p>
+                </div>
+                <div className="bg-muted/50 rounded-lg p-3">
+                  <p className="text-xs text-muted-foreground mb-0.5">Email</p>
+                  <p className="font-medium">{detailSession.userEmail || "—"}</p>
+                </div>
+                <div className="bg-muted/50 rounded-lg p-3">
+                  <p className="text-xs text-muted-foreground mb-0.5">Status</p>
+                  <Badge variant="outline" className={STATUS_STYLES[detailSession.status] ?? ""}>
+                    {STATUS_LABELS[detailSession.status] ?? detailSession.status}
+                  </Badge>
+                </div>
+                <div className="bg-muted/50 rounded-lg p-3">
+                  <p className="text-xs text-muted-foreground mb-0.5">Test Type</p>
+                  <p className="font-medium">{TYPE_LABELS[detailSession.testType] ?? detailSession.testType}</p>
+                </div>
               </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Email</span>
-                <span>{detailSession.userEmail || "—"}</span>
+
+              {/* Temperament result */}
+              {detailSession.primaryTemp && (
+                <div className="bg-primary/5 border border-primary/20 rounded-lg p-4">
+                  <p className="text-xs font-bold uppercase tracking-wider text-primary mb-2">Temperament Result</p>
+                  <p className={`text-xl font-black ${TEMP_COLOR[detailSession.primaryTemp] ?? ""}`}>
+                    {detailSession.primaryTemp}
+                  </p>
+                  {detailSession.secondaryTemp && (
+                    <p className="text-sm text-muted-foreground">
+                      Secondary: {detailSession.secondaryTemp}
+                    </p>
+                  )}
+                  {detailSession.blend && (
+                    <p className="text-xs text-muted-foreground mt-1">Blend: {detailSession.blend}</p>
+                  )}
+                </div>
+              )}
+
+              {/* Score breakdown */}
+              {detailSession.results && Object.keys(detailSession.results).length > 0 && (
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-2">Score Breakdown</p>
+                  <div className="space-y-2">
+                    {Object.entries(detailSession.results)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([temp, score]) => {
+                        const maxScore = ["child_3_5", "child_6_9", "preteen_10_12"].includes(detailSession.testType) ? 75 : 60;
+                        const pct = Math.round((score / maxScore) * 100);
+                        return (
+                          <div key={temp}>
+                            <div className="flex justify-between text-xs mb-0.5">
+                              <span className={`font-semibold ${temp === detailSession.primaryTemp ? "text-primary" : "text-muted-foreground"}`}>
+                                {temp} {temp === detailSession.primaryTemp ? "★" : ""}
+                              </span>
+                              <span className="font-bold">{pct}%</span>
+                            </div>
+                            <div className="h-2 bg-muted rounded-full overflow-hidden">
+                              <div
+                                className={`h-full rounded-full ${
+                                  temp === "Sanguine" ? "bg-amber-500" :
+                                  temp === "Choleric" ? "bg-red-500" :
+                                  temp === "Melancholic" ? "bg-blue-500" :
+                                  "bg-green-500"
+                                }`}
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </div>
+              )}
+
+              {/* Timestamps */}
+              <div className="border-t pt-3 space-y-1 text-xs text-muted-foreground">
+                <div className="flex justify-between">
+                  <span>Created</span>
+                  <span>{new Date(detailSession.createdAt).toLocaleString()}</span>
+                </div>
+                {detailSession.completedAt && (
+                  <div className="flex justify-between">
+                    <span>Completed</span>
+                    <span>{new Date(detailSession.completedAt).toLocaleString()}</span>
+                  </div>
+                )}
               </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Test Type</span>
-                <span>{TYPE_LABELS[detailSession.testType] ?? detailSession.testType}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Status</span>
-                <Badge variant="outline" className={STATUS_STYLES[detailSession.status] ?? ""}>
-                  {STATUS_LABELS[detailSession.status] ?? detailSession.status}
-                </Badge>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Created</span>
-                <span>{new Date(detailSession.createdAt).toLocaleString()}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Completed</span>
-                <span>{detailSession.completedAt ? new Date(detailSession.completedAt).toLocaleString() : "—"}</span>
-              </div>
+
+              {/* View full results */}
+              {detailSession.status === "completed" && (
+                <Button
+                  className="w-full bg-primary hover:bg-primary/90"
+                  onClick={() => {
+                    window.location.href = `/results/${detailSession.id}`;
+                  }}
+                >
+                  <ExternalLink className="h-4 w-4 mr-2" />
+                  View Full Results
+                </Button>
+              )}
             </div>
           )}
         </DialogContent>
