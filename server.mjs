@@ -663,9 +663,12 @@ async function handleAPI(req, res, ip) {
       return json(res, { error: "Passcode has no remaining slots" }, 410);
     }
     const newId = `ts-${randomUUID().slice(0, 8)}`;
+    const userObj = sessionUserId ? await db.findUserById(sessionUserId) : null;
     const sessionRecord = {
       id: newId,
       userId: sessionUserId || "anonymous",
+      userEmail: userObj?.email || "",
+      userName: userObj ? `${userObj.firstName || ""} ${userObj.lastName || ""}`.trim() : "",
       testType: body.testType || "single_test",
       status: "pending",
       paid: true,
