@@ -144,6 +144,17 @@ VALUES
   ('ts-006', 'u-001', 'alice@example.com',     'Alice Park',     'group_test',  'completed', true,  'choleric',   'melancholic','Choleric-Melancholic','TM-NP78QR', '2026-07-08T09:00:00.000Z', '2026-07-08T09:15:00.000Z')
 ON CONFLICT (id) DO NOTHING;
 
+-- Corporate Teams
+CREATE TABLE IF NOT EXISTS corporate_teams (
+  id TEXT PRIMARY KEY,
+  admin_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  member_session_ids JSONB NOT NULL DEFAULT '[]',
+  report JSONB,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- ============================================================
 -- MIGRATION: Run this if your test_sessions table already exists
 -- without answers/results columns

@@ -863,6 +863,84 @@ async function handleAPI(req, res, ip) {
     return json(res, (await db.listUsers()).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
   }
 
+  // ── Corporate Teams ────────────────────────────────────────────────────────
+
+  if (method === "GET" && url === "/api/corporate/sessions") {
+    audit(ip, method, url, 200, sessionUserId);
+    const sessions = await db.listCorporateSessions();
+    return json(res, sessions);
+  }
+
+  if (method === "GET" && url === "/api/corporate/teams") {
+    audit(ip, method, url, 200, sessionUserId);
+    const teams = await db.listCorporateTeams(sessionUserId);
+    return json(res, teams);
+  }
+
+  if (method === "POST" && url === "/api/corporate/teams") {
+    const body = await readBody(req);
+    if (!body.name || !body.memberSessionIds || !Array.isArray(body.memberSessionIds) || body.memberSessionIds.length < 2) {
+      audit(ip, method, url, 400, sessionUserId);
+      return json(res, { error: "Name and at least 2 member sessions required" }, 400);
+    }
+    const newId = `ct-${randomUUID().slice(0, 8)}`;
+    const team = {
+      id: newId,
+      adminId: sessionUserId || "anonymous",
+      name: body.name,
+      memberSessionIds: body.memberSessionIds,
+      report: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await db.createCorporateTeam(team);
+    audit(ip, method, url, 201, sessionUserId);
+    return json(res, team, 201);
+  }
+
+  if (method === "GET" && url.startsWith("/api/corporate/teams/")) {
+    const teamId = url.split("/").pop();
+    if (!isValidId(teamId)) {
+      audit(ip, method, url, 400, sessionUserId);
+      return json(res, { error: "Invalid team ID" }, 400);
+    }
+    const team = await db.findCorporateTeamById(teamId);
+    if (!team) {
+      audit(ip, method, url, 404, sessionUserId);
+      return json(res, { error: "Team not found" }, 404);
+    }
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, team);
+  }
+
+  if (method === "POST" && url.startsWith("/api/corporate/teams/") && url.endsWith("/report")) {
+    const teamId = url.split("/")[4];
+    if (!isValidId(teamId)) {
+      audit(ip, method, url, 400, sessionUserId);
+      return json(res, { error: "Invalid team ID" }, 400);
+    }
+    const team = await db.findCorporateTeamById(teamId);
+    if (!team) {
+      audit(ip, method, url, 404, sessionUserId);
+      return json(res, { error: "Team not found" }, 404);
+    }
+    const memberSessions = [];
+    for (const sessionId of team.memberSessionIds) {
+      const session = await db.findTestSessionById(sessionId);
+      if (session) memberSessions.push(session);
+    }
+    const members = memberSessions.map(s => ({
+      memberId: s.id,
+      memberName: s.userEmail || "Team Member",
+      primaryTemp: s.primaryTemp || "Sanguine",
+      secondaryTemp: s.secondaryTemp || null,
+      results: s.results || {},
+    }));
+    const primaryTemps = members.map(m => m.primaryTemp);
+    audit(ip, method, url, 200, sessionUserId);
+    return json(res, { team, members, primaryTemps });
+  }
+
   audit(ip, method, url, 404, sessionUserId);
   return false;
 }

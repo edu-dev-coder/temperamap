@@ -9,6 +9,12 @@ import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import FrederaLogo from "@/components/FrederaLogo";
 import { CHILD_GUIDANCE, COUPLES_COMPATIBILITY } from "@/lib/child-guidance";
+import { getCouplesPairing } from "@/lib/couples-data";
+import { PartnerComparison } from "@/components/couples/PartnerComparison";
+import { LoveLanguageCard } from "@/components/couples/LoveLanguageCard";
+import { CommunicationGuide } from "@/components/couples/CommunicationGuide";
+import { LifeAreasCard } from "@/components/couples/LifeAreasCard";
+import { ConflictPlaybook } from "@/components/couples/ConflictPlaybook";
 
 interface TestSession {
   id: string;
@@ -179,7 +185,7 @@ const TEMP_BG: Record<string, string> = {
   Phlegmatic:  "from-green-600 to-green-700",
 };
 
-type TabKey = "overview" | "strengths" | "relationships" | "emotional" | "parenting" | "learning" | "compatibility" | "career";
+type TabKey = "overview" | "strengths" | "relationships" | "emotional" | "parenting" | "learning" | "compatibility" | "career" | "communication" | "love" | "life";
 
 function isChildTest(testType: string) {
   return ["child_3_5", "child_6_9", "preteen_10_12", "teen_13_17"].includes(testType);
@@ -296,6 +302,7 @@ export default function Results() {
   const testType = (session as any)?.testType ?? "single_test";
   const guidance = isChildTest(testType) ? (CHILD_GUIDANCE[testType]?.[primary] ?? null) : null;
   const compat = isCouplesTest(testType) ? (COUPLES_COMPATIBILITY[primary]?.[secondary ?? primary] ?? null) : null;
+  const couplesPairing = isCouplesTest(testType) ? getCouplesPairing(primary, secondary ?? primary) : null;
 
   const tabs: { key: TabKey; label: string }[] = (() => {
     const base: { key: TabKey; label: string }[] = [{ key: "overview", label: "Overview" }, { key: "strengths", label: "Strengths" }];
@@ -305,7 +312,7 @@ export default function Results() {
         base.push({ key: "career", label: "Career Paths" });
       }
     } else if (isCouplesTest(testType)) {
-      base.push({ key: "compatibility", label: "Compatibility" });
+      base.push({ key: "compatibility", label: "Compatibility" }, { key: "communication", label: "Communication" }, { key: "love", label: "Love & Intimacy" }, { key: "life", label: "Life Together" });
     } else {
       base.push({ key: "relationships", label: "Relationships" }, { key: "emotional", label: "Emotional Profile" });
     }
@@ -396,6 +403,13 @@ export default function Results() {
         {/* Overview */}
         {activeTab === "overview" && (
           <>
+            {isCouplesTest(testType) && couplesPairing && (
+              <PartnerComparison
+                partner1={{ primary, secondary: secondary ?? undefined }}
+                partner2={{ primary: (session as any).partner2PrimaryTemp ?? "Sanguine", secondary: (session as any).partner2SecondaryTemp ?? undefined }}
+                pairing={couplesPairing}
+              />
+            )}
             {Object.keys(results).length > 0 && (
               <Card>
                 <CardHeader>
@@ -672,7 +686,23 @@ export default function Results() {
                 </ul>
               </CardContent>
             </Card>
+            <ConflictPlaybook pairing={couplesPairing} />
           </>
+        )}
+
+        {/* Communication Guide (couples) */}
+        {activeTab === "communication" && couplesPairing && (
+          <CommunicationGuide pairing={couplesPairing} />
+        )}
+
+        {/* Love & Intimacy (couples) */}
+        {activeTab === "love" && couplesPairing && (
+          <LoveLanguageCard pairing={couplesPairing} partner1Name={user?.firstName || "Partner 1"} partner2Name={(session as any).partner2Name || "Partner 2"} />
+        )}
+
+        {/* Life Together (couples) */}
+        {activeTab === "life" && couplesPairing && (
+          <LifeAreasCard pairing={couplesPairing} />
         )}
 
         {/* Share CTA at bottom */}
