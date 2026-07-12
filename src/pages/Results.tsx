@@ -283,24 +283,26 @@ export default function Results() {
       // Score breakdown
       if (results && Object.keys(results).length > 0) {
         addText("Score Breakdown", 14, true, [30, 69, 128]);
+        y += 2;
         const maxScore = usesChildScoring(testType) ? 75 : 60;
         const sorted = Object.entries(results).sort((a, b) => b[1] - a[1]);
+        const labelW = contentW * 0.30;
+        const barX = margin + labelW + 4;
+        const barW = contentW - labelW - 20;
         for (const [temp, score] of sorted) {
           const pct = Math.round((score / maxScore) * 100);
-          const barW = contentW * 0.6;
-          const barX = margin + contentW * 0.35;
           doc.setFontSize(10);
           doc.setFont("helvetica", "bold");
           doc.setTextColor(50, 50, 50);
           doc.text(`${temp}${temp === primary ? " *" : ""}`, margin, y);
           doc.setFont("helvetica", "normal");
+          doc.setTextColor(100, 100, 100);
           doc.text(`${pct}%`, barX + barW + 3, y);
-          y += 1;
           doc.setFillColor(230, 230, 230);
-          doc.roundedRect(margin, y - 3, barW, 4, 2, 2, "F");
+          doc.roundedRect(barX, y - 3, barW, 4, 2, 2, "F");
           const tempC: [number, number, number] = temp === "Sanguine" ? [217, 119, 6] : temp === "Choleric" ? [220, 38, 38] : temp === "Melancholic" ? [37, 99, 235] : [22, 163, 74];
           doc.setFillColor(...tempC);
-          doc.roundedRect(margin, y - 3, barW * (pct / 100), 4, 2, 2, "F");
+          doc.roundedRect(barX, y - 3, barW * (pct / 100), 4, 2, 2, "F");
           y += 7;
         }
         y += 5;
