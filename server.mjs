@@ -623,7 +623,7 @@ async function handleAPI(req, res, ip) {
 
   // ── Tests ───────────────────────────────────────────────────────────────
   if (method === "GET" && url === "/api/tests") {
-    const parsed = new URL(url, `http://${req.headers.host || "localhost"}`);
+    const parsed = new URL(req.url || "/api/tests", `http://${req.headers.host || "localhost"}`);
     const userId = parsed.searchParams.get("userId");
     try {
       const tests = userId
