@@ -600,10 +600,20 @@ async function handleAPI(req, res, ip) {
       audit(ip, method, url, 400, sessionUserId);
       return json(res, { error: "Invalid test type" }, 400);
     }
-    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let code = "TM-";
-    for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
-    const record = { code, testType: body.testType, status: "active", createdAt: new Date().toISOString(), usedAt: null, usedBy: null };
+    const maxUses = Math.max(1, parseInt(body.maxUses, 10) || 1);
+    const code = db.generatePasscode(body.testType);
+    const expiresAt = body.expiresAt || null;
+    const record = {
+      code,
+      testType: body.testType,
+      status: "active",
+      maxUses,
+      currentUses: 0,
+      expiresAt,
+      createdAt: new Date().toISOString(),
+      usedAt: null,
+      usedBy: null,
+    };
     await db.createPasscode(record);
     audit(ip, method, url, 201, sessionUserId);
     return json(res, record, 201);
@@ -644,6 +654,14 @@ async function handleAPI(req, res, ip) {
       return json(res, { error: "Passcode is required" }, 400);
     }
     const match = await db.findPasscodeByCode(body.passcode);
+    if (!match) {
+      audit(ip, method, url, 404, sessionUserId);
+      return json(res, { error: "Invalid or expired passcode" }, 404);
+    }
+    if (match.currentUses >= match.maxUses) {
+      audit(ip, method, url, 410, sessionUserId);
+      return json(res, { error: "Passcode has no remaining slots" }, 410);
+    }
     const newId = `ts-${randomUUID().slice(0, 8)}`;
     const sessionRecord = {
       id: newId,

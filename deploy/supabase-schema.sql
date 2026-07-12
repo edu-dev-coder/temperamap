@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS passcodes (
   code TEXT UNIQUE NOT NULL,
   test_type TEXT NOT NULL,
   status TEXT DEFAULT 'active',
+  max_uses INTEGER DEFAULT 1,
+  current_uses INTEGER DEFAULT 0,
+  expires_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT now(),
   used_at TIMESTAMPTZ,
   used_by TEXT
@@ -161,3 +164,10 @@ CREATE TABLE IF NOT EXISTS corporate_teams (
 -- ============================================================
 -- ALTER TABLE test_sessions ADD COLUMN IF NOT EXISTS answers JSONB;
 -- ALTER TABLE test_sessions ADD COLUMN IF NOT EXISTS results JSONB;
+
+-- ============================================================
+-- MIGRATION: Add slot-limit fields to passcodes table
+-- ============================================================
+ALTER TABLE passcodes ADD COLUMN IF NOT EXISTS max_uses INTEGER DEFAULT 1;
+ALTER TABLE passcodes ADD COLUMN IF NOT EXISTS current_uses INTEGER DEFAULT 0;
+ALTER TABLE passcodes ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
