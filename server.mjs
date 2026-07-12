@@ -649,18 +649,22 @@ async function handleAPI(req, res, ip) {
 
   if (method === "POST" && url === "/api/tests") {
     const body = await readBody(req);
-    if (!body.passcode) {
+    const isPartnerJoin = !body.passcode && body.testType === "couples_test";
+    if (!body.passcode && !isPartnerJoin) {
       audit(ip, method, url, 400, sessionUserId);
       return json(res, { error: "Passcode is required" }, 400);
     }
-    const match = await db.findPasscodeByCode(body.passcode);
-    if (!match) {
-      audit(ip, method, url, 404, sessionUserId);
-      return json(res, { error: "Invalid or expired passcode" }, 404);
-    }
-    if (match.currentUses >= match.maxUses) {
-      audit(ip, method, url, 410, sessionUserId);
-      return json(res, { error: "Passcode has no remaining slots" }, 410);
+    let match = null;
+    if (!isPartnerJoin) {
+      match = await db.findPasscodeByCode(body.passcode);
+      if (!match) {
+        audit(ip, method, url, 404, sessionUserId);
+        return json(res, { error: "Invalid or expired passcode" }, 404);
+      }
+      if (match.currentUses >= match.maxUses) {
+        audit(ip, method, url, 410, sessionUserId);
+        return json(res, { error: "Passcode has no remaining slots" }, 410);
+      }
     }
     const newId = `ts-${randomUUID().slice(0, 8)}`;
     const userObj = sessionUserId ? await db.findUserById(sessionUserId) : null;
@@ -670,7 +674,7 @@ async function handleAPI(req, res, ip) {
       userEmail: userObj?.email || "",
       userName: userObj ? `${userObj.firstName || ""} ${userObj.lastName || ""}`.trim() : "",
       testType: body.testType || "single_test",
-      status: "pending",
+      status: isPartnerJoin ? "paid" : "pending",
       paid: true,
       passcodeUsed: body.passcode,
       createdAt: new Date().toISOString(),
